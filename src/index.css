@@ -1,0 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400..800;1,400..800&family=Manrope:wght@200..800&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-background-sand: #F5ECE3;
+  --color-card-cream: #FAF2EA;
+  --color-primary-terracotta: #C2652A;
+  --color-secondary-taupe: #78706A;
+  --color-tertiary-burgundy: #8C3C3C;
+  --color-neutral-charcoal: #605850;
+  
+  --font-display: "EB Garamond", serif;
+  --font-serif: "EB Garamond", serif;
+  --font-body: "Manrope", sans-serif;
+  --font-label: "Manrope", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+:root {
+  background-color: #F5ECE3 !important;
+  color: #3E3A36 !important;
+  font-family: "Manrope", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body, html {
+  background-color: #F5ECE3 !important;
+  color: #3E3A36 !important;
+}
+
+/* Scrollbar tweaks */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #F0E6D8;
+}
+::-webkit-scrollbar-thumb {
+  background: #C2652A;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #8C3C3C;
+}
+
+/* Custom dot grid pattern matching the image representation */
+.sand-dot-grid {
+  background-image: radial-gradient(#605850 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Premium micro-shadow matching the warm UI style */
+.warm-shadow {
+  box-shadow: 4px 4px 0px 0px #605850;
+}
+.warm-shadow-lg {
+  box-shadow: 8px 8px 0px 0px #605850;
+}
+.warm-shadow-primary {
+  box-shadow: 4px 4px 0px 0px #C2652A;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+.hover-raise {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.hover-raise:hover {
+  transform: translateY(-2px);
+}

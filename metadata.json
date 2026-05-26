@@ -1,0 +1,6 @@
+{
+  "name": "ChatFlux",
+  "description": "Unified conversational AI booking tracker and multi-platform automation reply hub.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
