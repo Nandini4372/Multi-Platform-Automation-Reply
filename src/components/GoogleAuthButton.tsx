@@ -27,8 +27,12 @@ export default function GoogleAuthButton({ profile, onUpdateProfile }: GoogleAut
       });
     } catch (err: any) {
       console.error("Firebase Google Auth error:", err);
-      // Fallback or display friendly error message
-      setError(err?.message || "Failed to authenticate. Open app in new tab if popups nested in folders get blocked.");
+      let errMsg = err?.message || "Failed to authenticate. Open app in new tab if popups nested in folders are blocked.";
+      
+      if (err?.code === "auth/unauthorized-domain" || (err?.message && err.message.includes("unauthorized-domain"))) {
+        errMsg = `🔒 Domain Authorization Needed: Please add "${window.location.hostname}" to your Firebase Console > Authentication > Settings > Authorized Domains.`;
+      }
+      setError(errMsg);
     } finally {
       setLoading(false);
     }
@@ -93,9 +97,9 @@ export default function GoogleAuthButton({ profile, onUpdateProfile }: GoogleAut
         Sign In with Google
       </button>
       {error && (
-        <span className="text-[10px] text-red-700 font-mono flex items-center gap-0.5 max-w-[180px] break-words text-right">
-          <AlertCircle className="w-3 h-3 text-red-700 shrink-0" />
-          <span>{error.substring(0, 60)}...</span>
+        <span className="text-[10px] text-red-700 font-mono flex items-start gap-1 max-w-[240px] break-words text-right mt-1">
+          <AlertCircle className="w-3 h-3 text-red-700 shrink-0 mt-0.5" />
+          <span>{error}</span>
         </span>
       )}
     </div>

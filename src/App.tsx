@@ -11,7 +11,9 @@ import {
   Hash,
   Sparkles,
   Database,
-  ArrowRight
+  ArrowRight,
+  AlertTriangle,
+  X
 } from "lucide-react";
 import { PageView, UserProfile } from "./types";
 import LandingPage from "./components/LandingPage";
@@ -39,6 +41,8 @@ export default function App() {
       loggedIn: false,
     };
   });
+
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   // Listen to verified firebase authentication state changes
   useEffect(() => {
@@ -79,11 +83,20 @@ export default function App() {
 
   // Google sign in trigger mapping via real popup
   const handleLogInSimulation = async () => {
+    setLoginError(null);
     try {
       await signInWithPopup(auth, googleProvider);
+      setLoginError(null);
       setCurrentView("Inbox");
-    } catch (err) {
+    } catch (err: any) {
       console.error("Real Google login trigger failed:", err);
+      let errMsg = err?.message || "Google Authentication failed.";
+      
+      // Specialize unauthorized-domain auth error
+      if (err?.code === "auth/unauthorized-domain" || (err?.message && err.message.includes("unauthorized-domain"))) {
+        errMsg = `🔒 Domain Authorization Error: Please add your active deployment hostname "${window.location.hostname}" to the Authorized Domains list in the Firebase Console!`;
+      }
+      setLoginError(errMsg);
     }
   };
 
@@ -183,6 +196,48 @@ export default function App() {
           <GoogleAuthButton profile={profile} onUpdateProfile={setProfile} />
         </div>
       </header>
+
+      {/* Dynamic Authorization Info / Login Alert Banner */}
+      {loginError && (
+        <div id="auth-unauthorized-domain-banner" className="max-w-4xl mx-auto mt-4 px-4 transition-all animation-fade-in">
+          <div className="bg-[#FAF2EA] border-2 border-[#C2652A] relative p-5 md:p-6 warm-shadow flex flex-col md:flex-row gap-4 items-start rounded-sm">
+            <div className="p-2.5 bg-red-50 border border-[#C2652A] text-[#C2652A] rounded-xs shrink-0">
+              <AlertTriangle className="w-6 h-6 animate-pulse" />
+            </div>
+            
+            <div className="space-y-2 flex-1 text-sm">
+              <h3 className="font-display font-black text-[#C2652A] uppercase tracking-wider text-base md:text-lg leading-tight">
+                Firebase Authentication Domain Authorization Needed
+              </h3>
+              <p className="text-neutral-charcoal leading-relaxed font-body font-medium">
+                Google Sign-In has failed because your current website URL is not listed as an allowed redirect of your Firebase credentials.
+              </p>
+              
+              <div className="p-4 bg-white/70 border border-neutral-charcoal/30 rounded-xs space-y-1.5 leading-normal max-w-2xl font-body">
+                <p className="font-bold uppercase tracking-wider text-xs text-[#C2652A]">Quick 3-step setup guide to fix this:</p>
+                <ol className="list-decimal pl-4 text-xs space-y-1 text-neutral-charcoal/90">
+                  <li>Go directly to your <a href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" className="font-bold text-blue-700 underline hover:text-blue-900">Firebase Console</a></li>
+                  <li>In the sidebar, choose <strong>Authentication</strong>, go to the <strong>Settings</strong> tab, and click <strong>Authorized domains</strong></li>
+                  <li>Click the <strong>Add domain</strong> button and append exactly: <code className="bg-neutral-100 px-1.5 py-0.5 rounded border font-mono font-bold text-neutral-charcoal select-all">{window.location.hostname}</code></li>
+                </ol>
+                <div className="text-[10px] text-neutral-charcoal/60 pt-1 font-mono flex flex-wrap gap-2">
+                  <span>Detected Hostname: <strong>{window.location.hostname}</strong></span>
+                  <span>•</span>
+                  <span>Origin URL: {window.location.origin}</span>
+                </div>
+              </div>
+            </div>
+
+            <button 
+              onClick={() => setLoginError(null)}
+              className="absolute top-3 right-3 p-1 hover:bg-neutral-charcoal/10 text-neutral-charcoal/50 hover:text-neutral-charcoal rounded-sm cursor-pointer border border-[#FAF2EA]"
+              title="Close Banner"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Node Router */}
       <main className="flex-1 pb-20">

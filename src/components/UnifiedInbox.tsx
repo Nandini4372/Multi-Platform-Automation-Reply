@@ -205,6 +205,32 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
   const [supabaseLoading, setSupabaseLoading] = useState(false);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [supabaseSuccess, setSupabaseSuccess] = useState(false);
+  const [hasAutoFetched, setHasAutoFetched] = useState(false);
+
+  // Backend integration status checking
+  const [backendStatus, setBackendStatus] = useState({
+    supabaseConfigured: false,
+    supabaseUrl: "",
+    supabaseTableName: "bookings",
+    n8nConfigured: false,
+    n8nWebhookUrl: ""
+  });
+
+  const fetchBackendStatus = async () => {
+    try {
+      const res = await fetch("/api/integration-status");
+      if (res.ok) {
+        const data = await res.json();
+        setBackendStatus(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch backend integration status:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchBackendStatus();
+  }, []);
 
   // n8n AI Brain Config state
   const [n8nConfig, setN8nConfig] = useState<N8NBrainConfig>(() => {
@@ -253,50 +279,45 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
     }
   }, [selectedPlatform, bookings]);
 
-  // Trigger real Supabase Fetch for WhatsApp only
-  const handleFetchSupabase = async (configOverride?: SupabaseConfig) => {
-    const configToUse = configOverride || supabaseConfig;
-    if (!configToUse.url || !configToUse.anonKey) {
-      setSupabaseError("Please provide both Supabase URL and Anon API Key");
-      return;
-    }
-
+  // Trigger real Supabase Fetch for WhatsApp only through secure backend routes
+  const handleFetchSupabase = async () => {
     setSupabaseLoading(true);
     setSupabaseError(null);
     setSupabaseSuccess(false);
 
     try {
-      const supabase = createClient(configToUse.url, configToUse.anonKey);
-      const table = configToUse.tableName || "bookings";
+      // Re-query backend configuration status to check for dynamic updates
+      const checkRes = await fetch("/api/integration-status");
+      const checkData = await checkRes.json();
+      setBackendStatus(checkData);
 
-      // Try querying ordered; if created_at column missing, query plain
-      let result = await supabase
-        .from(table)
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (result.error) {
-        console.warn("Ordered query failed or column missing, trying without order filter:", result.error);
-        result = await supabase
-          .from(table)
-          .select("*");
+      if (!checkData.supabaseConfigured) {
+        throw new Error("Supabase is not configured on your server backend. Please declare SUPABASE_URL and SUPABASE_ANON_KEY inside your server environment variables to query real data securely.");
       }
 
-      if (result.error) {
-        throw new Error(result.error.message);
+      const response = await fetch("/api/supabase/bookings");
+      const json = await response.json();
+      if (!response.ok || !json.success) {
+        throw new Error(json.error || "Failed to query booking records from secure server endpoint.");
       }
 
-      const data = result.data;
+      const data = json.data;
       if (data) {
         if (data.length === 0) {
-          throw new Error(`Connection established, but the table "${table}" returned 0 rows. Make sure you have at least one test row, or check if Row-Level Security (RLS) is blocking anonymous select queries.`);
+          // Empty table handles elegantly by clearing WhatsApp list without showing an error
+          setBookings(prev => {
+            const nonWhatsApp = prev.filter(b => b.platform !== "whatsapp");
+            return nonWhatsApp;
+          });
+          setSupabaseSuccess(true);
+          setTimeout(() => setShowConfig(false), 2000);
+          return;
         }
 
         // Map raw data safely with dynamic, case-insensitive, key-agnostic headers extractor
         const mapped: Booking[] = data.map((item: any) => {
           const selectField = (preferKeys: string[], defaultVal: string) => {
             const keys = Object.keys(item);
-            // Search case-insensitive or matching potential aliases
             for (const preferred of preferKeys) {
               const matchedKey = keys.find(k => k.toLowerCase() === preferred.toLowerCase());
               if (matchedKey && item[matchedKey] !== undefined && item[matchedKey] !== null) {
@@ -309,7 +330,6 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
           const rawCustName = selectField(["customer_name", "name", "client_name", "username", "first_name", "client", "title", "contact_name"], "Anonymous Client");
           const rawCustPhone = selectField(["customer_phone", "phone_number", "phone", "mobile", "tel", "contact", "phone_no"], "Unknown Number");
           
-          // Try to extract date and time separately or split combined time
           const rawBookingDate = selectField(["booking_date", "date", "scheduled_date", "appointment_date", "booking_day"], "");
           const rawBookingTime = selectField(["booking_time", "time", "scheduled_time", "appointment_time", "booking_hour"], "");
           const combinedTime = selectField(["time", "appointment", "created_at", "scheduled_at", "datetime"], "Unscheduled");
@@ -346,7 +366,6 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
             platform: "whatsapp",
             notes: notes.toString(),
             
-            // Custom precise requested fields
             customer_name: rawCustName.toString(),
             customer_phone: rawCustPhone.toString(),
             booking_date: parsedDate,
@@ -361,18 +380,24 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
           return [...mapped, ...nonWhatsApp];
         });
 
-        localStorage.setItem("chatflux_supabase_config", JSON.stringify(configToUse));
         setSupabaseSuccess(true);
         setTimeout(() => setShowConfig(false), 2000);
       }
     } catch (err: any) {
       console.error(err);
-      // Construct a highly detailed technical helper error for the user
-      setSupabaseError(err.message || "Failed to query. Pinpoint: spellings of your table names, RLS rules, schema headers or URL.");
+      setSupabaseError(err.message || "Failed to query server database.");
     } finally {
       setSupabaseLoading(false);
     }
   };
+
+  // Auto-fetch Supabase data once configured safely on mount/detection
+  useEffect(() => {
+    if (backendStatus.supabaseConfigured && !hasAutoFetched) {
+      setHasAutoFetched(true);
+      handleFetchSupabase();
+    }
+  }, [backendStatus.supabaseConfigured, hasAutoFetched]);
 
   const resetWhatsAppCache = () => {
     setBookings(prev => {
@@ -390,144 +415,52 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
     setN8nTriggerSuccess(false);
     
     const timestampLog = new Date().toISOString().substring(11, 19);
-    const initialLogs = [
-      `[${timestampLog}] 🔌 Initializing API core connection pulse...`,
-      `[${timestampLog}] 📦 Encapsulating conversational text payload...`,
-    ];
-    setN8nLogs(initialLogs);
-    
-    // Fallback parsing client side
-    let parsedName = "Extracted n8n Client";
-    const nameMatch = n8nTestPayload.match(/(?:for|named|is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
-    if (nameMatch && nameMatch[1]) {
-      parsedName = nameMatch[1];
-    } else {
-      const dbMatch = n8nTestPayload.match(/([A-Z][a-z]+\s+[A-Z][a-z]+)/);
-      if (dbMatch && dbMatch[1] && !n8nTestPayload.startsWith(dbMatch[1])) {
-        parsedName = dbMatch[1];
-      }
-    }
-
-    let parsedPhone = "+39 333 456 7891";
-    const phoneMatch = n8nTestPayload.match(/(\+?\d[\d\s\-]{7,16})/);
-    if (phoneMatch && phoneMatch[0]) {
-      parsedPhone = phoneMatch[0].trim();
-    }
-
-    let parsedDate = new Date().toISOString().split('T')[0];
-    if (n8nTestPayload.toLowerCase().includes("tomorrow")) {
-      const tmr = new Date();
-      tmr.setDate(tmr.getDate() + 1);
-      parsedDate = tmr.toISOString().split('T')[0];
-    }
-
-    let parsedTime = "10:15 AM";
-    const timeMatch = n8nTestPayload.match(/(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))/i);
-    if (timeMatch && timeMatch[1]) {
-      parsedTime = timeMatch[1].toUpperCase();
-    }
+    setN8nLogs([
+      `[${timestampLog}] 🔌 Initiating secure client handshake connection to backend server...`,
+      `[${timestampLog}] 📦 Encapsulating conversational test payload...`
+    ]);
 
     const payload = {
       message_content: n8nTestPayload,
-      sender_phone: parsedPhone,
+      sender_phone: "+39 333 456 7891",
       incoming_platform: selectedPlatform,
-      timestamp: new Date().toISOString(),
-      ai_model: n8nConfig.aiModelName
+      timestamp: new Date().toISOString()
     };
 
-    // Construct logs step-by-step
-    await new Promise(resolve => setTimeout(resolve, 500));
-    setN8nLogs(prev => [
-      ...prev,
-      `[${new Date().toISOString().substring(11, 19)}] 📡 Sending POST to: ${n8nConfig.webhookUrl || "[DEMO SIMULATION ENDPOINT]"}`,
-      `[${new Date().toISOString().substring(11, 19)}] 📄 Payload: ${JSON.stringify(payload, null, 2)}`
-    ]);
+    try {
+      const response = await fetch("/api/n8n/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
 
-    let requestSucceeded = false;
-    let serverResponseText = "";
-
-    if (n8nConfig.webhookUrl) {
-      try {
-        const response = await fetch(n8nConfig.webhookUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(n8nConfig.authorizationHeader ? { "Authorization": n8nConfig.authorizationHeader } : {})
-          },
-          body: JSON.stringify(payload)
-        });
-        
-        requestSucceeded = response.ok;
-        serverResponseText = await response.text();
-        
-        await new Promise(resolve => setTimeout(resolve, 600));
-        setN8nLogs(prev => [
-          ...prev,
-          `[${new Date().toISOString().substring(11, 19)}] 📥 Received HTTP ${response.status} from n8n Server!`,
-          `[${new Date().toISOString().substring(11, 19)}] 💬 Server Response: ${serverResponseText.substring(0, 100) || "(Empty body)"}`
-        ]);
-        
-      } catch (err: any) {
-        console.warn("Real request to n8n Webhook failed:", err);
-        requestSucceeded = false;
-        serverResponseText = err.message || "CORS/Network Blocked";
-        
-        await new Promise(resolve => setTimeout(resolve, 600));
-        setN8nLogs(prev => [
-          ...prev,
-          `[${new Date().toISOString().substring(11, 19)}] ⚠️ Network / CORS Boundary limit detected!`,
-          `[${new Date().toISOString().substring(11, 19)}] 🧪 Activating n8n AI Brain Pipeline simulator fallback...`
-        ]);
-      }
-    } else {
-      // Direct simulation when no webhookUrl is set
-      await new Promise(resolve => setTimeout(resolve, 800));
-      requestSucceeded = true;
-    }
-
-    // Now execute the simulated AI Brain workflow step logging
-    await new Promise(resolve => setTimeout(resolve, 600));
-    setN8nLogs(prev => [
-      ...prev,
-      `[${new Date().toISOString().substring(11, 19)}] 🧠 n8n Workflow Step 1: Parsing unstructured query with ${n8nConfig.aiModelName}...`,
-    ]);
-
-    await new Promise(resolve => setTimeout(resolve, 700));
-    setN8nLogs(prev => [
-      ...prev,
-      `[${new Date().toISOString().substring(11, 19)}] ✨ extracted_data: { name: "${parsedName}", phone: "${parsedPhone}", date: "${parsedDate}", time: "${parsedTime}" }`,
-      `[${new Date().toISOString().substring(11, 19)}] 🗃️ n8n Workflow Step 2: Formulating Supabase insert query row...`
-    ]);
-
-    await new Promise(resolve => setTimeout(resolve, 800));
-    setN8nLogs(prev => [
-      ...prev,
-      `[${new Date().toISOString().substring(11, 19)}] 🚀 n8n Workflow Step 3: Inserting client record into Supabase table "${supabaseConfig.tableName || 'bookings'}"...`,
-      `[${new Date().toISOString().substring(11, 19)}] ✅ Pipeline complete! Database table refreshed with processed client lead.`
-    ]);
-
-    // Create the booking live in our state! This acts exactly as if n8n inserted it and we fetched it!
-    const newBookingId = "n8n-lead-" + Math.floor(Math.random() * 10000);
-    const newBooking: Booking = {
-      id: newBookingId,
-      name: parsedName,
-      phone: parsedPhone,
-      time: `${parsedDate} ${parsedTime}`.trim(),
-      status: "Pending",
-      platform: selectedPlatform,
-      notes: `✨ AI Processed via n8n: "${n8nTestPayload}"`,
+      const json = await response.json();
       
-      customer_name: parsedName,
-      customer_phone: parsedPhone,
-      booking_date: parsedDate,
-      booking_time: parsedTime,
-      booking_status: "Pending"
-    };
+      if (json.logs && Array.isArray(json.logs)) {
+        setN8nLogs(json.logs);
+      } else {
+        setN8nLogs(prev => [...prev, `[${new Date().toISOString().substring(11, 19)}] Received generic server response.`]);
+      }
 
-    setBookings(prev => [newBooking, ...prev]);
-    setSelectedBooking(newBooking);
-    setN8nTriggerSuccess(true);
-    setN8nTriggerLoading(false);
+      if (!response.ok) {
+        throw new Error(json.error || "Failed to complete secure server side webhook execution.");
+      }
+
+      if (json.data) {
+        setBookings(prev => {
+          const nonMatching = prev.filter(b => b.id !== json.data.id);
+          return [json.data, ...nonMatching];
+        });
+        setSelectedBooking(json.data);
+        setN8nTriggerSuccess(true);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setN8nTriggerError(err.message || "Failed to execute workflow.");
+      setN8nLogs(prev => [...prev, `[${new Date().toISOString().substring(11, 19)}] ⚠️ Fail state triggered on server: ${err.message}`]);
+    } finally {
+      setN8nTriggerLoading(false);
+    }
   };
 
   // Status Toggler
@@ -844,7 +777,7 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
             <div className="flex items-center gap-2 text-primary-terracotta">
               <Database className="w-5 h-5 text-[#C2652A]" />
               <h3 className="font-display text-base font-bold uppercase tracking-tight text-neutral-charcoal">
-                Supabase Live Database Integration Setup
+                Supabase Server-Side Database Integration Setup
               </h3>
             </div>
             <button
@@ -855,113 +788,79 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
             </button>
           </div>
 
-          <div className="bg-amber-50/50 p-4 border border-dashed border-amber-300 rounded-sm text-neutral-charcoal space-y-3">
-            <p className="font-body text-xs font-medium leading-relaxed">
-              👋 <strong>Connecting your custom database is simple!</strong> Standardize your client funnel by streaming live leads directly from your Supabase table into your WhatsApp pipeline in real-time.
-            </p>
-            <div className="grid sm:grid-cols-2 gap-4 text-xs font-body leading-relaxed divide-y sm:divide-y-0 sm:divide-x divide-neutral-charcoal/20">
-              <div className="space-y-1.5 pr-2">
-                <span className="font-mono text-[10px] uppercase font-bold text-[#C2652A] block">1. Required Field Information</span>
-                <ul className="list-disc list-inside space-y-1 text-neutral-charcoal/95">
-                  <li><strong>Project URL:</strong> Your unique Supabase backend endpoint URL.</li>
-                  <li><strong>Anon Public Key:</strong> Client-side token representing safe public access.</li>
-                  <li><strong>Table Name:</strong> The target table name (defaults to <code>bookings</code>).</li>
-                </ul>
-              </div>
-              <div className="space-y-1.5 sm:pl-4 pt-2 sm:pt-0">
-                <span className="font-mono text-[10px] uppercase font-bold text-emerald-700 block">2. Automatic Column Name Mapping</span>
-                <p className="text-[11px] text-neutral-charcoal/80">
-                  Our app is <strong>column-agnostic</strong>! You do not need to rename your columns. We automatically match any of these column header variations:
+          <div className="grid md:grid-cols-3 gap-4">
+            <div className="md:col-span-2 space-y-3">
+              <div className="p-3.5 border rounded-sm bg-[#FAF2EA]/40 border-neutral-charcoal/50 text-xs font-body text-neutral-charcoal space-y-2">
+                <span className="font-mono text-[9px] uppercase font-bold text-[#C2652A] block">🔌 BACKEND ROUTING ADVANTAGE</span>
+                <p className="leading-relaxed">
+                  Your Supabase credentials are processed entirely on the <strong>Node.js backend server</strong>. 
+                  This eliminates browser client-side database token exposures, provides complete confidentiality, and circumvents browser CORS blocks automatically.
                 </p>
-                <div className="grid grid-cols-2 gap-1 text-[10px] font-mono mt-1 text-neutral-charcoal/90">
-                  <div>• <strong>Name:</strong> client_name, username, client, contact_name</div>
-                  <div>• <strong>Phone:</strong> phone_number, mobile, tel, phone_no</div>
-                  <div>• <strong>Time:</strong> created_at, scheduled_at, appointment, date</div>
-                  <div>• <strong>Notes:</strong> notes, note, message_content, details, enquiry</div>
+              </div>
+
+              <div className="p-4 border rounded-sm border-neutral-charcoal bg-[#FAF2EA]/10 text-xs font-body text-neutral-charcoal space-y-2">
+                <p className="font-bold text-neutral-charcoal">Automatic Case-Agnostic Column Mapping:</p>
+                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono leading-normal text-neutral-charcoal/90">
+                  <div>• <strong>Customer Name:</strong> client_name, name, customer_name, username</div>
+                  <div>• <strong>Phone Number:</strong> phone_number, customer_phone, phone, tel</div>
+                  <div>• <strong>Scheduled Time:</strong> created_at, scheduled_at, booking_date, time</div>
+                  <div>• <strong>Comments/Notes:</strong> notes, message_content, details, enquiry</div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="space-y-4">
-            <h4 className="font-mono text-xs font-bold uppercase tracking-wide text-neutral-charcoal border-b pb-1">
-              Enter Database Details below:
-            </h4>
-            
-            <div className="grid md:grid-cols-3 gap-4">
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal">Supabase URL *</label>
-                  <span className="text-[9px] text-[#C2652A] font-mono uppercase">Settings &gt; API</span>
+            <div className="space-y-3">
+              <div className="p-4 border rounded-sm border-neutral-charcoal bg-white flex flex-col justify-between h-full space-y-3 min-h-[160px]">
+                <div className="space-y-1">
+                  <span className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal/60">INTEGRATION STATUS</span>
+                  {backendStatus.supabaseConfigured ? (
+                    <div className="text-emerald-700 font-mono text-[11px] font-bold flex items-center gap-1.5 p-1 bg-emerald-50 rounded-sm">
+                      <span className="w-2.5 h-2.5 bg-emerald-600 rounded-full animate-pulse" />
+                      <span>SECURED & ACTIVE</span>
+                    </div>
+                  ) : (
+                    <div className="text-amber-700 font-mono text-[11px] font-bold flex items-center gap-1.5 p-1 bg-amber-50 rounded-sm">
+                      <span className="w-2.5 h-2.5 bg-amber-500 rounded-full" />
+                      <span>DEMO SANDBOX ACTIVE</span>
+                    </div>
+                  )}
                 </div>
-                <input
-                  type="text"
-                  placeholder="https://yourprojectid.supabase.co"
-                  value={supabaseConfig.url}
-                  onChange={e => setSupabaseConfig(prev => ({ ...prev, url: e.target.value.trim() }))}
-                  className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                />
-                <p className="text-[10px] text-neutral-charcoal/60 leading-tight">Must begin with https://</p>
-              </div>
 
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal">Anon API Public Key *</label>
-                  <span className="text-[9px] text-[#C2652A] font-mono uppercase">public safe key</span>
+                <div className="text-xs space-y-1 leading-snug">
+                  <p className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal/60">TARGET TABLE</p>
+                  <p className="font-bold font-mono">"{backendStatus.supabaseTableName}"</p>
                 </div>
-                <input
-                  type="password"
-                  placeholder="eyJhbGciOi..."
-                  value={supabaseConfig.anonKey}
-                  onChange={e => setSupabaseConfig(prev => ({ ...prev, anonKey: e.target.value.trim() }))}
-                  className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                />
-                <p className="text-[10px] text-neutral-charcoal/60 leading-tight">Paste your public anon api key here</p>
-              </div>
 
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal">Table Name *</label>
-                  <span className="text-[9px] text-[#C2652A] font-mono uppercase">database table</span>
-                </div>
-                <input
-                  type="text"
-                  placeholder="bookings"
-                  value={supabaseConfig.tableName}
-                  onChange={e => setSupabaseConfig(prev => ({ ...prev, tableName: e.target.value.trim() }))}
-                  className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                />
-                <p className="text-[10px] text-neutral-charcoal/60 leading-tight">Your bookings or customer leads table name</p>
+                {!backendStatus.supabaseConfigured && (
+                  <p className="text-[10px] text-neutral-charcoal/60 leading-tight">
+                    💡 Register <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> inside your host server's <code>.env</code> file to sync custom tables dynamically.
+                  </p>
+                )}
               </div>
             </div>
-          </div>
-
-          <div className="font-body text-xs bg-neutral-50 p-3.5 border border-neutral-charcoal/30 rounded-sm">
-            <span className="font-bold text-neutral-charcoal">🔐 Security Note:</span> All credentials are saved strictly inside your local browser memory (<code>localStorage</code>) to keep database accesses completely private to you.
           </div>
 
           {supabaseError && (
             <div className="p-3.5 bg-red-50 border border-red-300 text-red-950 font-body text-xs space-y-1 rounded-sm">
               <div className="flex items-center gap-2 font-bold text-red-900">
                 <AlertCircle className="w-4 h-4 text-red-700 shrink-0" />
-                <span>Connection Testing Unsuccessful</span>
+                <span>Backend Database Sync Unsuccessful</span>
               </div>
               <p className="text-[11px] leading-relaxed opacity-90 pl-6">
-                <strong>Error details:</strong> {supabaseError}
+                <strong>Error:</strong> {supabaseError}
               </p>
               <div className="pl-6 pt-1 text-[10px] text-neutral-charcoal/80 space-y-0.5">
-                <p>💡 <em>Tip 1:</em> Verify your Supabase URL doesn't contain a trailing slash (e.g. <code>.co/</code>).</p>
-                <p>💡 <em>Tip 2:</em> Make sure to disable Row-Level Security (RLS) on your table, or add a policy that allows anonymous select permissions, otherwise the connection might return empty rows.</p>
+                <p>💡 <em>Troubleshooting:</em> Ensure the table name configured in <code>SUPABASE_TABLE_NAME</code> (currently default: <strong>{backendStatus.supabaseTableName}</strong>) exists on your Supabase dashboard and permits select privileges to Anon roles.</p>
               </div>
             </div>
           )}
 
           {supabaseSuccess && (
-            <div className="p-3.5 bg-emerald-50 border border-emerald-300 text-emerald-950 font-body text-xs flex items-center gap-2 rounded-sm animate-flash">
-              <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 animate-bounce" />
+            <div className="p-3.5 bg-emerald-50 border border-[#A7F3D0] text-emerald-950 font-body text-xs flex items-center gap-2 rounded-sm">
+              <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
               <div>
-                <p className="font-bold text-emerald-900">Success! Database Connected</p>
-                <p className="text-[11px] text-emerald-800">Your table has been fully queried and mapped to your live WhatsApp leads feed. Connection details saved safely!</p>
+                <p className="font-bold text-emerald-900">Success! Synchronized Live Dataset Successfully</p>
+                <p className="text-[11px] text-emerald-800">Your table has been fully queried and mapped to your live WhatsApp leads feed in real-time.</p>
               </div>
             </div>
           )}
@@ -974,25 +873,23 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
               Reset to Sandbox Defaults
             </button>
             
-            <div className="flex gap-2 w-full sm:w-auto">
-              <button
-                onClick={() => handleFetchSupabase()}
-                disabled={supabaseLoading}
-                className="w-full sm:w-auto px-5 py-2.5 bg-[#C2652A] hover:bg-amber-800 text-white font-mono text-xs font-bold uppercase tracking-wider border border-neutral-charcoal rounded-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm transition-colors active:translate-y-[1px]"
-              >
-                {supabaseLoading ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    Connecting...
-                  </>
-                ) : (
-                  <>
-                    <Database className="w-3.5 h-3.5" />
-                    Save & Test Query
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              onClick={() => handleFetchSupabase()}
+              disabled={supabaseLoading}
+              className="w-full sm:w-auto px-5 py-2.5 bg-[#C2652A] hover:bg-amber-800 text-white font-mono text-xs font-bold uppercase tracking-wider border border-neutral-charcoal rounded-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm transition-colors active:translate-y-[1px]"
+            >
+              {supabaseLoading ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  Querying Backend...
+                </>
+              ) : (
+                <>
+                  <Database className="w-3.5 h-3.5" />
+                  Sync Live Database Table
+                </>
+              )}
+            </button>
           </div>
         </div>
       )}
@@ -1002,7 +899,7 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
         <div id="n8n-configuration-panel" className="bg-white border rounded-sm p-6 border-neutral-charcoal warm-shadow space-y-6">
           <div className="flex justify-between items-center border-b border-neutral-charcoal pb-3">
             <div className="flex items-center gap-2 text-primary-terracotta">
-              <Sparkles className="w-5 h-5 text-primary-terracotta" />
+              <Sparkles className="w-5 h-5 text-primary-terracotta animate-pulse" />
               <h3 className="font-display text-base font-bold uppercase tracking-tight text-neutral-charcoal">
                 🧠 n8n AI Brain Orchestration Hub
               </h3>
@@ -1020,33 +917,29 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
             <div className="space-y-4 text-xs font-body leading-relaxed">
               <div className="bg-[#FAF2EA] p-4 border border-neutral-charcoal">
                 <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-[#FAF2EA] bg-primary-terracotta px-2 py-0.5 rounded-sm">
-                  ARCHITECTURAL CORE // WHY N8N?
+                  ARCHITECTURAL CORE // SERVER HANDOFF
                 </span>
                 <p className="font-bold text-[#C2652A] mt-2 mb-1.5 uppercase text-[11px]">
                   Connecting Conversational AI to Database Transactions
                 </p>
                 <p className="text-neutral-charcoal/90 leading-normal">
-                  Supabase is a high-performance database designed to store structured table schemas. However, it cannot parse complex customer messages like 
-                  <em> "Hey, reserve a slot for Marcus tomorrow at noon"</em> on its own. 
-                </p>
-                <p className="mt-1.5 font-bold text-neutral-charcoal">
-                  n8n acts as the "AI Brain" mediator:
+                  n8n acts as the "AI Brain" mediator. Since client browsers cannot natively trigger webhooks securely without leaking authorization secrets, all pipeline handshakes have been migrated to the <strong>Express server backend</strong>.
                 </p>
                 <div className="mt-2 pl-3 border-l-2 border-[#C2652A] py-1 text-neutral-charcoal/80 italic text-[11px] space-y-1">
-                  <div>1. 📲 Incoming Chat/Vocal payload received via Webhook.</div>
-                  <div>2. 🧠 Sent to a Gemini LLM Node for extraction.</div>
-                  <div>3. 🗃️ Structured JSON details written automatically to Supabase.</div>
-                  <div>4. 📈 Instantly displayed on this Unified Inbox!</div>
+                  <div>1. 📲 Raw payload is sent to <code>/api/n8n/trigger</code> endpoint.</div>
+                  <div>2. 🧠 Sent directly to active <code>Gemini LLM</code> models or your live custom n8n instance.</div>
+                  <div>3. 🗃️ Parsed JSON is written automatically to database tables.</div>
+                  <div>4. 📈 Mapped results instantly update the live Unified Inbox interface.</div>
                 </div>
               </div>
 
               {/* Copyable n8n workflow spec */}
               <div className="space-y-2">
                 <h4 className="font-mono text-[10px] font-bold uppercase text-neutral-charcoal opacity-70">
-                  🏷️ Recommended n8n Node Blueprint format
+                  🏷️ Expected n8n Webhook JSON spec
                 </h4>
                 <p className="text-[11px] text-neutral-charcoal/80">
-                  Configure your n8n AI Advanced Agent node to extract and output this exact JSON payload directly to your Supabase node:
+                  Configure your n8n LLM Node or active webhook to parse unstructured customer entries into this structured schema:
                 </p>
                 <pre className="p-3 bg-neutral-900 text-[#FAF2EA] font-mono text-[10px] rounded-sm overflow-x-auto leading-normal">
 {`{
@@ -1061,79 +954,57 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
               </div>
             </div>
 
-            {/* Column 2: Inputs and Interactive Playground */}
+            {/* Column 2: Status & Sandbox Playground */}
             <div className="space-y-4">
-              <h4 className="font-mono text-xs font-bold uppercase tracking-wide text-neutral-charcoal border-b pb-1">
-                Configure your n8n Webhook Settings:
-              </h4>
-
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal flex justify-between">
-                    <span>n8n Webhook Production URL</span>
-                    <span className="text-primary-terracotta text-[9px] lowercase font-normal">Active webhook trigger</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="https://n8n.yourdomain.com/webhook/incoming-whatsapp-agent"
-                    value={n8nConfig.webhookUrl}
-                    onChange={e => setN8nConfig(prev => ({ ...prev, webhookUrl: e.target.value }))}
-                    className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                  />
-                  <p className="text-[10px] text-neutral-charcoal/50">Your n8n webhook listener URL. Leaving it blank switches to demo sandbox simulation.</p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
+              <div className="p-4 border rounded-sm border-neutral-charcoal bg-white space-y-2">
+                <span className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal/60 block">AI ORCHESTRATION PIPELINE STATUS</span>
+                {backendStatus.n8nConfigured ? (
                   <div className="space-y-1">
-                    <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal">Authorization Header</label>
-                    <input
-                      type="password"
-                      placeholder="Bearer n8n_secret..."
-                      value={n8nConfig.authorizationHeader}
-                      onChange={e => setN8nConfig(prev => ({ ...prev, authorizationHeader: e.target.value }))}
-                      className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                    />
+                    <div className="text-emerald-700 font-mono text-[11px] font-bold flex items-center gap-1.5 p-1.5 bg-emerald-50 rounded-sm inline-flex">
+                      <span className="w-2 bg-emerald-600 h-2 rounded-full animate-pulse" />
+                      <span>CUSTOM WEBHOOK ROUTING ACTIVE</span>
+                    </div>
+                    <p className="text-[10px] font-mono text-neutral-charcoal/70 break-all bg-neutral-50 p-1">
+                      Endpoint: {backendStatus.n8nWebhookUrl}
+                    </p>
                   </div>
+                ) : (
                   <div className="space-y-1">
-                    <label className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal">AI model used in n8n</label>
-                    <select
-                      value={n8nConfig.aiModelName}
-                      onChange={e => setN8nConfig(prev => ({ ...prev, aiModelName: e.target.value }))}
-                      className="w-full text-xs font-mono p-2.5 border border-neutral-charcoal bg-card-cream rounded-sm outline-none focus:ring-1 focus:ring-[#C2652A]"
-                    >
-                      <option value="Gemini 2.5 Pro">Gemini 2.5 Pro</option>
-                      <option value="Gemini 2.5 Flash">Gemini 2.5 Flash</option>
-                      <option value="OpenAI GPT-4o">OpenAI GPT-4o</option>
-                      <option value="Claude 3.5 Sonnet">Claude 3.5 Sonnet</option>
-                    </select>
+                    <div className="text-amber-700 font-mono text-[11px] font-bold flex items-center gap-1.5 p-1.5 bg-amber-50 rounded-sm inline-flex">
+                      <span className="w-2 bg-amber-500 h-2 rounded-full" />
+                      <span>SERVER-SIDE COMPASS AI STANDBY</span>
+                    </div>
+                    <p className="text-[10px] text-neutral-charcoal/60 leading-tight">
+                      To integrate custom n8n webhooks, specify <code>N8N_WEBHOOK_URL</code> in your backend environment variables (secrets). Server-side AI models will execute fallbacks.
+                    </p>
                   </div>
-                </div>
+                )}
               </div>
 
-              {/* Live Webhook test playground form */}
-              <div className="mt-4 p-4 border border-neutral-charcoal bg-[#FAF2EA]/30 space-y-3">
+              {/* Webhook AI playground */}
+              <div className="mt-4 p-4 border border-neutral-charcoal bg-[#FAF2EA]/30 space-y-3 rounded-sm">
                 <span className="font-mono text-[10px] uppercase font-bold text-[#C2652A] flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 animate-spin" /> Webhook trigger and AI Extraction Playground
+                  <Sparkles className="w-3.5 h-3.5 animate-spin" /> Live Webhook & Server AI Test Playground
                 </span>
                 <p className="text-[11px] text-neutral-charcoal opacity-95">
-                  Type a sample raw chat or voice description below to simulate what gets fed to n8n:
+                  Type unformatted customer message text below to execute the server parser flow:
                 </p>
                 <textarea
                   value={n8nTestPayload}
                   onChange={e => setN8nTestPayload(e.target.value)}
                   placeholder="Paste unstructured user text..."
                   rows={2}
-                  className="w-full text-xs p-2 bg-white border border-neutral-charcoal font-sans"
+                  className="w-full text-xs p-2.5 bg-white border border-neutral-charcoal font-sans outline-none focus:ring-1 focus:ring-[#C2652A]"
                 />
 
                 <button
                   onClick={handleTriggerN8NWebhook}
                   disabled={n8nTriggerLoading}
-                  className="w-full py-2 bg-[#C2652A] hover:bg-amber-800 disabled:opacity-50 text-white font-mono text-xs font-bold uppercase tracking-wide border border-neutral-charcoal cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                  className="w-full py-2 bg-[#C2652A] hover:bg-amber-800 disabled:opacity-50 text-white font-mono text-xs font-bold uppercase tracking-wide border border-neutral-charcoal cursor-pointer flex items-center justify-center gap-1.5 shadow-sm transition-colors"
                 >
                   {n8nTriggerLoading ? (
                     <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Passing to n8n Webhook...
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading Server Handshake...
                     </>
                   ) : (
                     <>
@@ -1147,23 +1018,23 @@ export default function UnifiedInbox({ profile, onUpdateProfile, onNavigate, onS
 
           {/* Sandbox console output */}
           {(n8nLogs.length > 0 || n8nTriggerSuccess) && (
-            <div className="space-y-2 mt-4">
+            <div className="space-y-2 mt-4 border-t border-neutral-charcoal/10 pt-4">
               <span className="font-mono text-[10px] uppercase font-bold text-neutral-charcoal opacity-70 block">
-                💻 n8n AI Brain Pipeline Console Output:
+                💻 Backend AI Brain / Webhook Pipeline Activity Feed:
               </span>
               <div className="p-4 bg-neutral-900 text-[#FAF2EA] font-mono text-[11px] space-y-1.5 rounded-sm select-text border border-neutral-charcoal overflow-x-auto max-h-60 leading-relaxed">
                 {n8nLogs.map((log, index) => (
-                  <div key={index} className={log.includes("⚠️") || log.includes("limit") ? "text-amber-400" : log.includes("✅") || log.includes("complete") ? "text-emerald-400" : "text-neutral-200"}>
+                  <div key={index} className={log.includes("⚠️") || log.includes("fail") || log.includes("Error") ? "text-amber-400" : log.includes("✅") || log.includes("complete") || log.includes("Success") ? "text-emerald-400" : "text-neutral-200"}>
                     {log}
                   </div>
                 ))}
               </div>
 
               {n8nTriggerSuccess && (
-                <div className="p-3 bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs flex items-center gap-2 rounded-sm animate-flash">
+                <div className="p-3 bg-emerald-50 border border-[#A7F3D0] text-emerald-950 text-xs flex items-center gap-2 rounded-sm">
                   <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
                   <div>
-                    <span className="font-bold">Extracted successfully!</span> Synthesized Lead was created as a <strong>{selectedPlatform.toUpperCase()}</strong> entity and loaded instantly into your reactive Unified Inbox list.
+                    <span className="font-bold">Extracted successfully by Server!</span> Mapped customer lead has been appended into your Unified CRM stream instantly.
                   </div>
                 </div>
               )}
